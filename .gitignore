@@ -5,5 +5,7 @@ __pycache__/
 data/*.db-journal
 storage/qr/*.png
 storage/pdf/*.pdf
+storage/photos/*
+!storage/photos/.gitkeep
 exports/*
 !exports/.gitkeep
