@@ -8,6 +8,11 @@ import qrcode
 import streamlit as st
 from fpdf import FPDF
 
+try:
+    from supabase import create_client
+except Exception:
+    create_client = None
+
 
 BASE_DIR = Path(__file__).parent
 DATA_DIR = BASE_DIR / "data"
@@ -16,6 +21,120 @@ PDF_DIR = BASE_DIR / "storage" / "pdf"
 PHOTO_DIR = BASE_DIR / "storage" / "photos"
 EXPORTS_DIR = BASE_DIR / "exports"
 DB_PATH = DATA_DIR / "petpass.db"
+SUPABASE_PHOTO_BUCKET = "pet-photos"
+DEMO_CLINIC_NAME = "Clinica Demo PetPass MX"
+DEMO_CLINIC_CODE = "PETPASS-DEMO"
+
+
+def supabase_credentials():
+    try:
+        url = st.secrets.get("SUPABASE_URL", "")
+        key = st.secrets.get("SUPABASE_KEY", "")
+    except Exception:
+        url = ""
+        key = ""
+    return str(url or "").strip(), str(key or "").strip()
+
+
+def supabase_enabled():
+    url, key = supabase_credentials()
+    return bool(create_client and url and key)
+
+
+@st.cache_resource
+def get_supabase_client(url, key):
+    return create_client(url, key)
+
+
+def sb():
+    url, key = supabase_credentials()
+    return get_supabase_client(url, key)
+
+
+def cloud_mode():
+    return supabase_enabled() and bool(st.session_state.get("clinica_id"))
+
+
+def current_clinic_id():
+    return st.session_state.get("clinica_id")
+
+
+def rows_to_df(rows):
+    return pd.DataFrame(rows or [])
+
+
+def ensure_demo_clinic():
+    client = sb()
+    found = (
+        client.table("clinicas")
+        .select("*")
+        .eq("codigo_acceso", DEMO_CLINIC_CODE)
+        .limit(1)
+        .execute()
+    )
+    if found.data:
+        return found.data[0]
+
+    created = (
+        client.table("clinicas")
+        .insert(
+            {
+                "nombre": DEMO_CLINIC_NAME,
+                "telefono": "5512345678",
+                "email": "demo@petpass.mx",
+                "codigo_acceso": DEMO_CLINIC_CODE,
+                "activo": True,
+            }
+        )
+        .execute()
+    )
+    return created.data[0] if created.data else None
+
+
+def show_clinic_gate():
+    page_header(
+        "PetPass MX Cloud",
+        "Selecciona clinica",
+        "Entra con el codigo de tu clinica o usa la demo publica para probar la app en nube.",
+    )
+    st.info("Modo Supabase activo. Sin codigo, puedes entrar con la demo publica.")
+    code = st.text_input("Codigo de clinica")
+    col1, col2 = st.columns(2)
+
+    if col1.button("Entrar"):
+        if not code.strip():
+            st.error("Escribe un codigo de clinica.")
+            return
+        try:
+            result = (
+                sb()
+                .table("clinicas")
+                .select("*")
+                .eq("codigo_acceso", code.strip())
+                .eq("activo", True)
+                .limit(1)
+                .execute()
+            )
+            if result.data:
+                st.session_state["clinica_id"] = result.data[0]["id"]
+                st.session_state["clinica_nombre"] = result.data[0]["nombre"]
+                st.rerun()
+            else:
+                st.error("Codigo de clinica no encontrado.")
+        except Exception as exc:
+            st.error(f"No se pudo conectar con Supabase: {exc}")
+
+    if col2.button("Usar demo publica"):
+        try:
+            clinic = ensure_demo_clinic()
+            if clinic:
+                st.session_state["clinica_id"] = clinic["id"]
+                st.session_state["clinica_nombre"] = clinic["nombre"]
+                st.rerun()
+            else:
+                st.error("No se pudo crear o abrir la demo publica.")
+        except Exception as exc:
+            st.error(f"No se pudo abrir la demo publica: {exc}")
 
 
 def ensure_dirs():
@@ -92,6 +211,12 @@ def execute(query, params=()):
 
 
 def get_counts():
+    if cloud_mode():
+        tutores = len(load_tutores())
+        mascotas = len(load_mascotas())
+        vacunas = len(load_vacunas())
+        return tutores, mascotas, vacunas
+
     with get_conn() as conn:
         tutores = conn.execute("SELECT COUNT(*) FROM tutores").fetchone()[0]
         mascotas = conn.execute("SELECT COUNT(*) FROM mascotas").fetchone()[0]
@@ -209,10 +334,46 @@ def page_header(kicker, title, subtitle):
 
 
 def load_tutores():
+    if cloud_mode():
+        result = (
+            sb()
+            .table("tutores")
+            .select("*")
+            .eq("clinica_id", current_clinic_id())
+            .order("creado_en", desc=True)
+            .execute()
+        )
+        return rows_to_df(result.data)
     return read_df("SELECT * FROM tutores ORDER BY id DESC")
 
 
 def load_mascotas():
+    if cloud_mode():
+        mascotas = rows_to_df(
+            sb()
+            .table("mascotas")
+            .select("*")
+            .eq("clinica_id", current_clinic_id())
+            .order("creado_en", desc=True)
+            .execute()
+            .data
+        )
+        tutores = load_tutores()
+        if mascotas.empty:
+            return mascotas
+        if tutores.empty:
+            mascotas["tutor_nombre"] = ""
+            mascotas["tutor_telefono"] = ""
+            return mascotas
+        tutores_min = tutores[["id", "nombre", "telefono"]].rename(
+            columns={
+                "id": "tutor_id",
+                "nombre": "tutor_nombre",
+                "telefono": "tutor_telefono",
+            }
+        )
+        return mascotas.merge(tutores_min, on="tutor_id", how="left")
+
     return read_df(
         """
         SELECT m.*, t.nombre AS tutor_nombre, t.telefono AS tutor_telefono
@@ -224,6 +385,42 @@ def load_mascotas():
 
 
 def load_dashboard_pets():
+    if cloud_mode():
+        mascotas = load_mascotas()
+        vacunas = rows_to_df(
+            sb()
+            .table("vacunas")
+            .select("mascota_id, proxima_fecha")
+            .eq("clinica_id", current_clinic_id())
+            .execute()
+            .data
+        )
+        if mascotas.empty:
+            return mascotas
+        if vacunas.empty:
+            mascotas["proxima_fecha"] = ""
+        else:
+            vacunas = (
+                vacunas.dropna(subset=["proxima_fecha"])
+                .sort_values("proxima_fecha")
+                .groupby("mascota_id", as_index=False)
+                .first()
+            )
+            mascotas = mascotas.merge(
+                vacunas,
+                left_on="id",
+                right_on="mascota_id",
+                how="left",
+            )
+        mascotas = mascotas.rename(columns={"tutor_nombre": "tutor"})
+        if "foto_path" not in mascotas.columns:
+            mascotas["foto_path"] = ""
+        if "foto_url" not in mascotas.columns:
+            mascotas["foto_url"] = ""
+        if "proxima_fecha" not in mascotas.columns:
+            mascotas["proxima_fecha"] = ""
+        return mascotas[["id", "nombre", "foto_path", "foto_url", "tutor", "proxima_fecha"]].head(6)
+
     return read_df(
         """
         SELECT m.id, m.nombre, m.foto_path, t.nombre AS tutor, pv.proxima_fecha
@@ -242,6 +439,28 @@ def load_dashboard_pets():
 
 
 def load_vacunas():
+    if cloud_mode():
+        vacunas = rows_to_df(
+            sb()
+            .table("vacunas")
+            .select("*")
+            .eq("clinica_id", current_clinic_id())
+            .order("fecha_aplicada", desc=True)
+            .execute()
+            .data
+        )
+        mascotas = load_mascotas()
+        if vacunas.empty:
+            return vacunas
+        if mascotas.empty:
+            vacunas["mascota_nombre"] = ""
+            vacunas["tutor_nombre"] = ""
+            return vacunas
+        mascotas_min = mascotas[["id", "nombre", "tutor_nombre"]].rename(
+            columns={"id": "mascota_id", "nombre": "mascota_nombre"}
+        )
+        return vacunas.merge(mascotas_min, on="mascota_id", how="left")
+
     return read_df(
         """
         SELECT v.*, m.nombre AS mascota_nombre, t.nombre AS tutor_nombre
@@ -254,6 +473,53 @@ def load_vacunas():
 
 
 def get_pet_record(mascota_id):
+    if cloud_mode():
+        mascota = rows_to_df(
+            sb()
+            .table("mascotas")
+            .select("*")
+            .eq("clinica_id", current_clinic_id())
+            .eq("id", mascota_id)
+            .limit(1)
+            .execute()
+            .data
+        )
+        if mascota.empty:
+            return mascota, rows_to_df([])
+
+        tutor_id = mascota.iloc[0].get("tutor_id")
+        tutor = rows_to_df(
+            sb()
+            .table("tutores")
+            .select("*")
+            .eq("clinica_id", current_clinic_id())
+            .eq("id", tutor_id)
+            .limit(1)
+            .execute()
+            .data
+        )
+        if not tutor.empty:
+            mascota["tutor_nombre"] = tutor.iloc[0].get("nombre", "")
+            mascota["telefono"] = tutor.iloc[0].get("telefono", "")
+            mascota["email"] = tutor.iloc[0].get("email", "")
+            mascota["tutor_notas"] = tutor.iloc[0].get("notas", "")
+        else:
+            mascota["tutor_nombre"] = ""
+            mascota["telefono"] = ""
+            mascota["email"] = ""
+            mascota["tutor_notas"] = ""
+        vacunas = rows_to_df(
+            sb()
+            .table("vacunas")
+            .select("*")
+            .eq("clinica_id", current_clinic_id())
+            .eq("mascota_id", mascota_id)
+            .order("fecha_aplicada", desc=True)
+            .execute()
+            .data
+        )
+        return mascota, vacunas
+
     mascota = read_df(
         """
         SELECT m.*, t.nombre AS tutor_nombre, t.telefono, t.email, t.notas AS tutor_notas
@@ -293,6 +559,8 @@ def resolve_photo_path(photo_path):
     photo_path = str(photo_path).strip()
     if not photo_path:
         return None
+    if photo_path.startswith(("http://", "https://")):
+        return photo_path
     path = Path(photo_path)
     if not path.is_absolute():
         path = BASE_DIR / path
@@ -315,10 +583,37 @@ def save_pet_photo(uploaded_file, pet_id, pet_name):
         return ""
 
 
+def save_pet_photo_supabase(uploaded_file, pet_id, pet_name):
+    if not uploaded_file:
+        return ""
+    ext = Path(uploaded_file.name).suffix.lower()
+    if ext not in [".jpg", ".jpeg", ".png"]:
+        ext = ".jpg"
+    filename = (
+        f"{current_clinic_id()}/pet_{pet_id}_{safe_file_part(pet_name)}_"
+        f"{datetime.now().strftime('%Y%m%d%H%M%S')}{ext}"
+    )
+    try:
+        sb().storage.from_(SUPABASE_PHOTO_BUCKET).upload(
+            filename,
+            uploaded_file.getvalue(),
+            {"content-type": uploaded_file.type or "image/jpeg"},
+        )
+        public_url = sb().storage.from_(SUPABASE_PHOTO_BUCKET).get_public_url(filename)
+        if isinstance(public_url, str):
+            return public_url
+        if isinstance(public_url, dict):
+            return public_url.get("publicUrl") or public_url.get("public_url") or ""
+        return str(public_url or "")
+    except Exception as exc:
+        st.error(f"No se pudo subir la foto a Supabase Storage: {exc}")
+        return ""
+
+
 def pet_photo_path(mascota):
     if isinstance(mascota, dict):
-        return resolve_photo_path(mascota.get("foto_path"))
-    return resolve_photo_path(getattr(mascota, "foto_path", ""))
+        return resolve_photo_path(mascota.get("foto_url") or mascota.get("foto_path"))
+    return resolve_photo_path(getattr(mascota, "foto_url", "") or getattr(mascota, "foto_path", ""))
 
 
 def pdf_text(value):
@@ -547,17 +842,27 @@ def dashboard_page():
         '<p class="petpass-muted">Ordenadas por fecha para facilitar llamadas, recepción y seguimiento.</p>',
         unsafe_allow_html=True,
     )
-    proximas = read_df(
-        """
-        SELECT v.nombre_vacuna, v.proxima_fecha, v.responsable,
-               m.nombre AS mascota, t.nombre AS tutor, t.telefono
-        FROM vacunas v
-        LEFT JOIN mascotas m ON m.id = v.mascota_id
-        LEFT JOIN tutores t ON t.id = m.tutor_id
-        WHERE v.proxima_fecha IS NOT NULL AND v.proxima_fecha != ''
-        ORDER BY v.proxima_fecha ASC
-        """
-    )
+    if cloud_mode():
+        proximas = load_vacunas()
+        if not proximas.empty:
+            proximas = proximas.dropna(subset=["proxima_fecha"]).sort_values("proxima_fecha")
+            proximas = proximas.rename(
+                columns={"mascota_nombre": "mascota", "tutor_nombre": "tutor"}
+            )
+            columns = ["nombre_vacuna", "proxima_fecha", "responsable", "mascota", "tutor"]
+            proximas = proximas[[col for col in columns if col in proximas.columns]]
+    else:
+        proximas = read_df(
+            """
+            SELECT v.nombre_vacuna, v.proxima_fecha, v.responsable,
+                   m.nombre AS mascota, t.nombre AS tutor, t.telefono
+            FROM vacunas v
+            LEFT JOIN mascotas m ON m.id = v.mascota_id
+            LEFT JOIN tutores t ON t.id = m.tutor_id
+            WHERE v.proxima_fecha IS NOT NULL AND v.proxima_fecha != ''
+            ORDER BY v.proxima_fecha ASC
+            """
+        )
     if proximas.empty:
         st.info("Todavía no hay próximas vacunas registradas.")
     else:
@@ -581,10 +886,21 @@ def tutores_page():
 
     if submitted:
         if nombre.strip():
-            execute(
-                "INSERT INTO tutores (nombre, telefono, email, notas) VALUES (?, ?, ?, ?)",
-                (nombre.strip(), telefono.strip(), email.strip(), notas.strip()),
-            )
+            if cloud_mode():
+                sb().table("tutores").insert(
+                    {
+                        "clinica_id": current_clinic_id(),
+                        "nombre": nombre.strip(),
+                        "telefono": telefono.strip(),
+                        "email": email.strip(),
+                        "notas": notas.strip(),
+                    }
+                ).execute()
+            else:
+                execute(
+                    "INSERT INTO tutores (nombre, telefono, email, notas) VALUES (?, ?, ?, ?)",
+                    (nombre.strip(), telefono.strip(), email.strip(), notas.strip()),
+                )
             st.success("Listo: tutor guardado correctamente.")
             st.rerun()
         else:
@@ -606,7 +922,7 @@ def mascotas_page():
         return
 
     tutor_options = {
-        f"{row.nombre} - {row.telefono or 'sin teléfono'}": int(row.id)
+        f"{row.nombre} - {row.telefono or 'sin teléfono'}": row.id
         for row in tutores.itertuples()
     }
 
@@ -628,34 +944,60 @@ def mascotas_page():
 
     if submitted:
         if nombre.strip():
-            with get_conn() as conn:
-                cur = conn.cursor()
-                cur.execute(
-                    """
-                    INSERT INTO mascotas
-                    (tutor_id, nombre, especie, raza, sexo, fecha_nacimiento, peso, foto_path, notas)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        tutor_options[tutor_label],
-                        nombre.strip(),
-                        especie,
-                        raza.strip(),
-                        sexo,
-                        str(fecha_nacimiento) if fecha_nacimiento else "",
-                        peso,
-                        "",
-                        notas.strip(),
-                    ),
-                )
-                mascota_id = cur.lastrowid
-                foto_path = save_pet_photo(foto, mascota_id, nombre.strip())
-                if foto_path:
-                    cur.execute(
-                        "UPDATE mascotas SET foto_path = ? WHERE id = ?",
-                        (foto_path, mascota_id),
+            if cloud_mode():
+                created = (
+                    sb()
+                    .table("mascotas")
+                    .insert(
+                        {
+                            "clinica_id": current_clinic_id(),
+                            "tutor_id": tutor_options[tutor_label],
+                            "nombre": nombre.strip(),
+                            "especie": especie,
+                            "raza": raza.strip(),
+                            "sexo": sexo,
+                            "fecha_nacimiento": str(fecha_nacimiento) if fecha_nacimiento else None,
+                            "peso": peso,
+                            "notas": notas.strip(),
+                        }
                     )
-                conn.commit()
+                    .execute()
+                )
+                mascota_id = created.data[0]["id"] if created.data else None
+                foto_url = save_pet_photo_supabase(foto, mascota_id, nombre.strip()) if mascota_id else ""
+                if foto_url:
+                    sb().table("mascotas").update({"foto_url": foto_url}).eq(
+                        "id", mascota_id
+                    ).eq("clinica_id", current_clinic_id()).execute()
+            else:
+                with get_conn() as conn:
+                    cur = conn.cursor()
+                    cur.execute(
+                        """
+                        INSERT INTO mascotas
+                        (tutor_id, nombre, especie, raza, sexo, fecha_nacimiento, peso, foto_path, notas)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            tutor_options[tutor_label],
+                            nombre.strip(),
+                            especie,
+                            raza.strip(),
+                            sexo,
+                            str(fecha_nacimiento) if fecha_nacimiento else "",
+                            peso,
+                            "",
+                            notas.strip(),
+                        ),
+                    )
+                    mascota_id = cur.lastrowid
+                    foto_path = save_pet_photo(foto, mascota_id, nombre.strip())
+                    if foto_path:
+                        cur.execute(
+                            "UPDATE mascotas SET foto_path = ? WHERE id = ?",
+                            (foto_path, mascota_id),
+                        )
+                    conn.commit()
             st.success("Listo: mascota agregada al expediente.")
             st.rerun()
         else:
@@ -668,7 +1010,7 @@ def mascotas_page():
     if not mascotas_registradas.empty:
         st.markdown("### Agregar o cambiar foto")
         mascota_foto_options = {
-            f"{row.nombre} - Tutor: {row.tutor_nombre}": int(row.id)
+            f"{row.nombre} - Tutor: {row.tutor_nombre}": row.id
             for row in mascotas_registradas.itertuples()
         }
         with st.form("actualizar_foto_mascota", clear_on_submit=True):
@@ -688,16 +1030,28 @@ def mascotas_page():
                 mascota_row = mascotas_registradas[
                     mascotas_registradas["id"] == mascota_id
                 ].iloc[0]
-                foto_path = save_pet_photo(
-                    foto_existente,
-                    mascota_id,
-                    mascota_row["nombre"],
-                )
-                if foto_path:
-                    execute(
-                        "UPDATE mascotas SET foto_path = ? WHERE id = ?",
-                        (foto_path, mascota_id),
+                if cloud_mode():
+                    foto_path = save_pet_photo_supabase(
+                        foto_existente,
+                        mascota_id,
+                        mascota_row["nombre"],
                     )
+                    if foto_path:
+                        sb().table("mascotas").update({"foto_url": foto_path}).eq(
+                            "id", mascota_id
+                        ).eq("clinica_id", current_clinic_id()).execute()
+                else:
+                    foto_path = save_pet_photo(
+                        foto_existente,
+                        mascota_id,
+                        mascota_row["nombre"],
+                    )
+                    if foto_path:
+                        execute(
+                            "UPDATE mascotas SET foto_path = ? WHERE id = ?",
+                            (foto_path, mascota_id),
+                        )
+                if foto_path:
                     st.success("Listo: foto actualizada correctamente.")
                     st.rerun()
                 else:
@@ -718,7 +1072,7 @@ def vacunas_page():
         return
 
     mascota_options = {
-        f"{row.nombre} - Tutor: {row.tutor_nombre}": int(row.id)
+        f"{row.nombre} - Tutor: {row.tutor_nombre}": row.id
         for row in mascotas.itertuples()
     }
 
@@ -736,21 +1090,34 @@ def vacunas_page():
 
     if submitted:
         if nombre_vacuna.strip():
-            execute(
-                """
-                INSERT INTO vacunas
-                (mascota_id, nombre_vacuna, fecha_aplicada, proxima_fecha, responsable, notas)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    mascota_options[mascota_label],
-                    nombre_vacuna.strip(),
-                    str(fecha_aplicada) if fecha_aplicada else "",
-                    str(proxima_fecha) if proxima_fecha else "",
-                    responsable.strip(),
-                    notas.strip(),
-                ),
-            )
+            if cloud_mode():
+                sb().table("vacunas").insert(
+                    {
+                        "clinica_id": current_clinic_id(),
+                        "mascota_id": mascota_options[mascota_label],
+                        "nombre_vacuna": nombre_vacuna.strip(),
+                        "fecha_aplicada": str(fecha_aplicada) if fecha_aplicada else None,
+                        "proxima_fecha": str(proxima_fecha) if proxima_fecha else None,
+                        "responsable": responsable.strip(),
+                        "notas": notas.strip(),
+                    }
+                ).execute()
+            else:
+                execute(
+                    """
+                    INSERT INTO vacunas
+                    (mascota_id, nombre_vacuna, fecha_aplicada, proxima_fecha, responsable, notas)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        mascota_options[mascota_label],
+                        nombre_vacuna.strip(),
+                        str(fecha_aplicada) if fecha_aplicada else "",
+                        str(proxima_fecha) if proxima_fecha else "",
+                        responsable.strip(),
+                        notas.strip(),
+                    ),
+                )
             st.success("Listo: vacuna registrada en el pasaporte.")
             st.rerun()
         else:
@@ -772,7 +1139,7 @@ def expediente_page():
         return
 
     mascota_options = {
-        f"{row.nombre} - Tutor: {row.tutor_nombre}": int(row.id)
+        f"{row.nombre} - Tutor: {row.tutor_nombre}": row.id
         for row in mascotas.itertuples()
     }
     selected = st.selectbox("Seleccionar mascota", list(mascota_options.keys()))
@@ -823,6 +1190,15 @@ def expediente_page():
         if st.button("Generar PDF para entregar"):
             pdf_path = generate_pdf(mascota, vacunas)
             st.success(f"Listo: PDF generado en {pdf_path}")
+            try:
+                st.download_button(
+                    "Descargar PDF",
+                    data=pdf_path.read_bytes(),
+                    file_name=pdf_path.name,
+                    mime="application/pdf",
+                )
+            except Exception:
+                pass
 
     qr_path = QR_DIR / f"mascota_{mascota['id']}.png"
     if qr_path.exists():
@@ -836,6 +1212,18 @@ def expediente_page():
 
 
 def demo_exists():
+    if cloud_mode():
+        result = (
+            sb()
+            .table("tutores")
+            .select("id")
+            .eq("clinica_id", current_clinic_id())
+            .eq("email", "maria@demo.petpass.mx")
+            .limit(1)
+            .execute()
+        )
+        return bool(result.data)
+
     with get_conn() as conn:
         result = conn.execute(
             "SELECT COUNT(*) FROM tutores WHERE email LIKE '%@demo.petpass.mx'"
@@ -844,6 +1232,130 @@ def demo_exists():
 
 
 def load_demo_data():
+    if cloud_mode():
+        clinic = ensure_demo_clinic()
+        if not clinic:
+            return False
+        clinic_id = clinic["id"]
+        st.session_state["clinica_id"] = clinic_id
+        st.session_state["clinica_nombre"] = clinic["nombre"]
+
+        found = (
+            sb()
+            .table("tutores")
+            .select("id")
+            .eq("clinica_id", clinic_id)
+            .eq("email", "maria@demo.petpass.mx")
+            .limit(1)
+            .execute()
+        )
+        if found.data:
+            return False
+
+        tutores = (
+            sb()
+            .table("tutores")
+            .insert(
+                [
+                    {
+                        "clinica_id": clinic_id,
+                        "nombre": "Maria Lopez",
+                        "telefono": "5512345678",
+                        "email": "maria@demo.petpass.mx",
+                        "notas": "Cliente demo",
+                    },
+                    {
+                        "clinica_id": clinic_id,
+                        "nombre": "Carlos Perez",
+                        "telefono": "5587654321",
+                        "email": "carlos@demo.petpass.mx",
+                        "notas": "Cliente demo",
+                    },
+                ]
+            )
+            .execute()
+            .data
+        )
+        maria_id = tutores[0]["id"]
+        carlos_id = tutores[1]["id"]
+
+        pets = (
+            sb()
+            .table("mascotas")
+            .insert(
+                [
+                    {
+                        "clinica_id": clinic_id,
+                        "tutor_id": maria_id,
+                        "nombre": "Luna",
+                        "especie": "Perro",
+                        "raza": "French Poodle",
+                        "sexo": "Hembra",
+                        "fecha_nacimiento": "2021-04-15",
+                        "peso": 6.5,
+                        "notas": "Nerviosa",
+                    },
+                    {
+                        "clinica_id": clinic_id,
+                        "tutor_id": maria_id,
+                        "nombre": "Rocky",
+                        "especie": "Perro",
+                        "raza": "Mestizo",
+                        "sexo": "Macho",
+                        "fecha_nacimiento": "2020-08-20",
+                        "peso": 18.0,
+                        "notas": "Muy activo",
+                    },
+                    {
+                        "clinica_id": clinic_id,
+                        "tutor_id": carlos_id,
+                        "nombre": "Michi",
+                        "especie": "Gato",
+                        "raza": "Europeo domestico",
+                        "sexo": "Macho",
+                        "fecha_nacimiento": "2022-01-10",
+                        "peso": 4.2,
+                        "notas": "Tranquilo",
+                    },
+                ]
+            )
+            .execute()
+            .data
+        )
+
+        sb().table("vacunas").insert(
+            [
+                {
+                    "clinica_id": clinic_id,
+                    "mascota_id": pets[0]["id"],
+                    "nombre_vacuna": "Rabia",
+                    "fecha_aplicada": "2026-01-12",
+                    "proxima_fecha": "2027-01-12",
+                    "responsable": "Dra. Ana Ruiz",
+                    "notas": "Sin reaccion",
+                },
+                {
+                    "clinica_id": clinic_id,
+                    "mascota_id": pets[1]["id"],
+                    "nombre_vacuna": "Multiple canina",
+                    "fecha_aplicada": "2026-02-05",
+                    "proxima_fecha": "2027-02-05",
+                    "responsable": "Dr. Luis Mora",
+                    "notas": "",
+                },
+                {
+                    "clinica_id": clinic_id,
+                    "mascota_id": pets[2]["id"],
+                    "nombre_vacuna": "Triple felina",
+                    "fecha_aplicada": "2026-03-18",
+                    "proxima_fecha": "2027-03-18",
+                    "responsable": "Dra. Ana Ruiz",
+                    "notas": "",
+                },
+            ]
+        ).execute()
+        return True
+
     if demo_exists():
         return False
 
@@ -907,7 +1419,8 @@ def datos_demo_page():
         "Carga un ejemplo rápido para mostrar PetPass MX sin capturar información desde cero.",
     )
     st.write("Incluye 2 tutores, 3 mascotas y 3 vacunas.")
-    if st.button("Cargar datos demo"):
+    demo_button = "Crear datos demo en Supabase" if cloud_mode() else "Cargar datos demo"
+    if st.button(demo_button):
         loaded = load_demo_data()
         if loaded:
             st.success("Listo: datos demo cargados para presentar la app.")
@@ -921,8 +1434,17 @@ def main():
     apply_visual_style()
     init_db()
 
+    if supabase_enabled() and not current_clinic_id():
+        show_clinic_gate()
+        return
+
     st.sidebar.markdown("## PetPass MX")
     st.sidebar.caption("Demo local para veterinarias y estéticas caninas")
+    if cloud_mode():
+        st.sidebar.caption(f"Clinica: {st.session_state.get('clinica_nombre', 'Sin nombre')}")
+        st.sidebar.caption("Modo Supabase")
+    else:
+        st.sidebar.caption("Modo SQLite local")
     page = st.sidebar.radio(
         "Navegación",
         ["Dashboard", "Tutores", "Mascotas", "Vacunas", "Expediente", "Datos demo"],
