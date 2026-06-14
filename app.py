@@ -48,7 +48,15 @@ def get_supabase_client(url, key):
 
 def sb():
     url, key = supabase_credentials()
-    return get_supabase_client(url, key)
+    client = create_client(url, key)
+    access_token = st.session_state.get("access_token")
+    refresh_token = st.session_state.get("refresh_token")
+    if access_token and refresh_token:
+        try:
+            client.auth.set_session(access_token, refresh_token)
+        except Exception:
+            pass
+    return client
 
 
 def cloud_mode():
@@ -61,6 +69,68 @@ def current_clinic_id():
 
 def rows_to_df(rows):
     return pd.DataFrame(rows or [])
+
+
+def obj_value(obj, key, default=None):
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+def set_auth_state(auth_response):
+    user = obj_value(auth_response, "user")
+    session = obj_value(auth_response, "session")
+    access_token = obj_value(session, "access_token")
+    refresh_token = obj_value(session, "refresh_token")
+    user_id = obj_value(user, "id")
+
+    st.session_state["auth_user"] = {
+        "id": user_id,
+        "email": obj_value(user, "email", ""),
+    }
+    st.session_state["access_token"] = access_token
+    st.session_state["refresh_token"] = refresh_token
+    st.session_state["is_authenticated"] = bool(access_token)
+    st.session_state["modo_demo"] = False
+    return user_id
+
+
+def clear_session_state():
+    for key in [
+        "auth_user",
+        "access_token",
+        "refresh_token",
+        "clinica_id",
+        "clinica_nombre",
+        "modo_demo",
+        "is_authenticated",
+    ]:
+        st.session_state.pop(key, None)
+
+
+def load_user_clinic(user_id):
+    membership = (
+        sb()
+        .table("clinica_usuarios")
+        .select("*")
+        .eq("user_id", user_id)
+        .eq("activo", True)
+        .limit(1)
+        .execute()
+    )
+    if not membership.data:
+        return None
+
+    clinic_id = membership.data[0]["clinica_id"]
+    clinic = (
+        sb()
+        .table("clinicas")
+        .select("*")
+        .eq("id", clinic_id)
+        .limit(1)
+        .execute()
+    )
+    return clinic.data[0] if clinic.data else None
 
 
 def ensure_demo_clinic():
@@ -84,6 +154,7 @@ def ensure_demo_clinic():
                 "email": "demo@petpass.mx",
                 "codigo_acceso": DEMO_CLINIC_CODE,
                 "activo": True,
+                "plan": "demo",
             }
         )
         .execute()
@@ -93,48 +164,116 @@ def ensure_demo_clinic():
 
 def show_clinic_gate():
     page_header(
-        "PetPass MX Cloud",
-        "Selecciona clinica",
-        "Entra con el codigo de tu clinica o usa la demo publica para probar la app en nube.",
+        "PetPass MX V3",
+        "Acceso seguro",
+        "Inicia sesión, registra tu clínica o usa la demo pública con datos ficticios.",
     )
-    st.info("Modo Supabase activo. Sin codigo, puedes entrar con la demo publica.")
-    code = st.text_input("Codigo de clinica")
-    col1, col2 = st.columns(2)
+    login_tab, signup_tab, demo_tab = st.tabs(
+        ["Iniciar sesión", "Crear cuenta / registrar clínica", "Usar demo pública"]
+    )
 
-    if col1.button("Entrar"):
-        if not code.strip():
-            st.error("Escribe un codigo de clinica.")
-            return
-        try:
-            result = (
-                sb()
-                .table("clinicas")
-                .select("*")
-                .eq("codigo_acceso", code.strip())
-                .eq("activo", True)
-                .limit(1)
-                .execute()
-            )
-            if result.data:
-                st.session_state["clinica_id"] = result.data[0]["id"]
-                st.session_state["clinica_nombre"] = result.data[0]["nombre"]
-                st.rerun()
-            else:
-                st.error("Codigo de clinica no encontrado.")
-        except Exception as exc:
-            st.error(f"No se pudo conectar con Supabase: {exc}")
+    with login_tab:
+        with st.form("login_supabase"):
+            email = st.text_input("Email")
+            password = st.text_input("Password", type="password")
+            submitted = st.form_submit_button("Iniciar sesión")
 
-    if col2.button("Usar demo publica"):
-        try:
-            clinic = ensure_demo_clinic()
-            if clinic:
+        if submitted:
+            try:
+                response = sb().auth.sign_in_with_password(
+                    {"email": email.strip(), "password": password}
+                )
+                user_id = set_auth_state(response)
+                clinic = load_user_clinic(user_id)
+                if clinic:
+                    st.session_state["clinica_id"] = clinic["id"]
+                    st.session_state["clinica_nombre"] = clinic["nombre"]
+                    st.session_state["modo_demo"] = False
+                    st.success("Sesión iniciada.")
+                    st.rerun()
+                else:
+                    clear_session_state()
+                    st.error("Tu usuario no tiene clínica asignada.")
+            except Exception as exc:
+                st.error(f"No se pudo iniciar sesión: {exc}")
+
+    with signup_tab:
+        with st.form("signup_supabase"):
+            nombre_clinica = st.text_input("Nombre de clínica")
+            responsable = st.text_input("Nombre responsable")
+            email = st.text_input("Email de acceso")
+            password = st.text_input("Password", type="password")
+            telefono = st.text_input("Teléfono opcional")
+            submitted = st.form_submit_button("Crear cuenta y clínica")
+
+        if submitted:
+            if not nombre_clinica.strip() or not email.strip() or not password:
+                st.error("Clínica, email y password son obligatorios.")
+                return
+            try:
+                response = sb().auth.sign_up(
+                    {"email": email.strip(), "password": password}
+                )
+                user_id = set_auth_state(response)
+                if not st.session_state.get("is_authenticated"):
+                    st.info("Cuenta creada. Confirma tu email o desactiva confirmación para demo, luego inicia sesión.")
+                    return
+
+                codigo = (
+                    safe_file_part(nombre_clinica).upper()[:18]
+                    + "-"
+                    + datetime.now().strftime("%H%M%S")
+                )
+                created = (
+                    sb()
+                    .table("clinicas")
+                    .insert(
+                        {
+                            "nombre": nombre_clinica.strip(),
+                            "telefono": telefono.strip(),
+                            "email": email.strip(),
+                            "codigo_acceso": codigo,
+                            "activo": True,
+                            "owner_user_id": user_id,
+                            "creado_por": user_id,
+                            "plan": "real",
+                        }
+                    )
+                    .execute()
+                )
+                clinic = created.data[0]
+                sb().table("clinica_usuarios").insert(
+                    {
+                        "clinica_id": clinic["id"],
+                        "user_id": user_id,
+                        "rol": "admin",
+                        "activo": True,
+                    }
+                ).execute()
                 st.session_state["clinica_id"] = clinic["id"]
                 st.session_state["clinica_nombre"] = clinic["nombre"]
+                st.session_state["modo_demo"] = False
+                st.success("Cuenta y clínica creadas.")
                 st.rerun()
-            else:
-                st.error("No se pudo crear o abrir la demo publica.")
-        except Exception as exc:
-            st.error(f"No se pudo abrir la demo publica: {exc}")
+            except Exception as exc:
+                st.error(f"No se pudo crear la cuenta: {exc}")
+
+    with demo_tab:
+        st.warning("Demo pública con datos ficticios. No ingresar datos reales.")
+        if st.button("Usar demo pública"):
+            try:
+                clear_session_state()
+                clinic = ensure_demo_clinic()
+                if clinic:
+                    st.session_state["clinica_id"] = clinic["id"]
+                    st.session_state["clinica_nombre"] = clinic["nombre"]
+                    st.session_state["modo_demo"] = True
+                    st.session_state["is_authenticated"] = False
+                    st.rerun()
+                else:
+                    st.error("No se pudo crear o abrir la demo pública.")
+            except Exception as exc:
+                st.error(f"No se pudo abrir la demo pública: {exc}")
 
 
 def ensure_dirs():
@@ -589,31 +728,47 @@ def save_pet_photo_supabase(uploaded_file, pet_id, pet_name):
     ext = Path(uploaded_file.name).suffix.lower()
     if ext not in [".jpg", ".jpeg", ".png"]:
         ext = ".jpg"
-    filename = (
-        f"{current_clinic_id()}/pet_{pet_id}_{safe_file_part(pet_name)}_"
-        f"{datetime.now().strftime('%Y%m%d%H%M%S')}{ext}"
-    )
+    filename = f"{safe_file_part(pet_name)}_{datetime.now().strftime('%Y%m%d%H%M%S')}{ext}"
+    storage_path = f"{current_clinic_id()}/{pet_id}/{filename}"
     try:
         sb().storage.from_(SUPABASE_PHOTO_BUCKET).upload(
-            filename,
+            storage_path,
             uploaded_file.getvalue(),
             {"content-type": uploaded_file.type or "image/jpeg"},
         )
-        public_url = sb().storage.from_(SUPABASE_PHOTO_BUCKET).get_public_url(filename)
-        if isinstance(public_url, str):
-            return public_url
-        if isinstance(public_url, dict):
-            return public_url.get("publicUrl") or public_url.get("public_url") or ""
-        return str(public_url or "")
+        return storage_path
     except Exception as exc:
         st.error(f"No se pudo subir la foto a Supabase Storage: {exc}")
         return ""
 
 
+def signed_photo_url(storage_path):
+    if not storage_path:
+        return None
+    if str(storage_path).startswith(("http://", "https://")):
+        return storage_path
+    try:
+        signed = (
+            sb()
+            .storage.from_(SUPABASE_PHOTO_BUCKET)
+            .create_signed_url(str(storage_path), 3600)
+        )
+        if isinstance(signed, dict):
+            data = signed.get("data") or signed
+            return data.get("signedUrl") or data.get("signedURL") or data.get("signed_url")
+        return str(signed or "")
+    except Exception:
+        return None
+
+
 def pet_photo_path(mascota):
     if isinstance(mascota, dict):
-        return resolve_photo_path(mascota.get("foto_url") or mascota.get("foto_path"))
-    return resolve_photo_path(getattr(mascota, "foto_url", "") or getattr(mascota, "foto_path", ""))
+        value = mascota.get("foto_url") or mascota.get("foto_path")
+    else:
+        value = getattr(mascota, "foto_url", "") or getattr(mascota, "foto_path", "")
+    if cloud_mode():
+        return signed_photo_url(value)
+    return resolve_photo_path(value)
 
 
 def pdf_text(value):
@@ -1418,6 +1573,9 @@ def datos_demo_page():
         "Datos demo",
         "Carga un ejemplo rápido para mostrar PetPass MX sin capturar información desde cero.",
     )
+    if cloud_mode() and not st.session_state.get("modo_demo"):
+        st.info("Los datos demo en Supabase solo están disponibles dentro de la demo pública.")
+        return
     st.write("Incluye 2 tutores, 3 mascotas y 3 vacunas.")
     demo_button = "Crear datos demo en Supabase" if cloud_mode() else "Cargar datos demo"
     if st.button(demo_button):
@@ -1442,14 +1600,27 @@ def main():
     st.sidebar.caption("Demo local para veterinarias y estéticas caninas")
     if cloud_mode():
         st.sidebar.caption(f"Clinica: {st.session_state.get('clinica_nombre', 'Sin nombre')}")
-        st.sidebar.caption("Modo Supabase")
+        if st.session_state.get("modo_demo"):
+            st.sidebar.caption("Modo demo pública")
+        else:
+            st.sidebar.caption("Modo Supabase Auth")
+        if st.sidebar.button("Cerrar sesión"):
+            try:
+                if st.session_state.get("is_authenticated"):
+                    sb().auth.sign_out()
+            except Exception:
+                pass
+            clear_session_state()
+            st.rerun()
     else:
         st.sidebar.caption("Modo SQLite local")
     page = st.sidebar.radio(
         "Navegación",
         ["Dashboard", "Tutores", "Mascotas", "Vacunas", "Expediente", "Datos demo"],
     )
-    st.sidebar.caption("SQLite local | Sin nube | Sin login")
+    if st.session_state.get("modo_demo"):
+        st.warning("Demo pública con datos ficticios. No ingresar datos reales.")
+    st.sidebar.caption("SQLite local o Supabase seguro")
 
     if page == "Dashboard":
         dashboard_page()
