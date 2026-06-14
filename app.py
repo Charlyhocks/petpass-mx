@@ -93,6 +93,115 @@ def get_counts():
     return tutores, mascotas, vacunas
 
 
+def apply_visual_style():
+    st.markdown(
+        """
+        <style>
+        .stApp {
+            background: linear-gradient(180deg, #f3fbf8 0%, #ffffff 42%);
+            color: #173b3f;
+        }
+        .block-container {
+            max-width: 1180px;
+            padding-top: 2rem;
+            padding-bottom: 3rem;
+        }
+        h1, h2, h3 {
+            color: #143f42;
+            letter-spacing: 0;
+        }
+        [data-testid="stSidebar"] {
+            background: #123f42;
+        }
+        [data-testid="stSidebar"] * {
+            color: #f4fffb;
+        }
+        [data-testid="stSidebar"] [role="radiogroup"] label {
+            border-radius: 10px;
+            padding: 0.35rem 0.6rem;
+            margin-bottom: 0.15rem;
+        }
+        [data-testid="stMetric"] {
+            background: #ffffff;
+            border: 1px solid #d8eee6;
+            border-left: 6px solid #24a484;
+            border-radius: 14px;
+            padding: 1rem 1rem 0.8rem;
+            box-shadow: 0 8px 24px rgba(18, 63, 66, 0.08);
+        }
+        div.stButton > button,
+        a[data-testid="stLinkButton"] {
+            background: #16866d;
+            border: 1px solid #16866d;
+            border-radius: 10px;
+            color: white;
+            font-weight: 700;
+        }
+        div.stButton > button:hover,
+        a[data-testid="stLinkButton"]:hover {
+            background: #0f6f5a;
+            border-color: #0f6f5a;
+            color: white;
+        }
+        .petpass-hero {
+            background: linear-gradient(135deg, #123f42 0%, #16866d 100%);
+            border-radius: 18px;
+            padding: 1.5rem 1.7rem;
+            margin-bottom: 1.3rem;
+            color: white;
+            box-shadow: 0 14px 34px rgba(18, 63, 66, 0.16);
+        }
+        .petpass-hero .kicker {
+            color: #bff4e4;
+            font-size: 0.85rem;
+            font-weight: 800;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            margin-bottom: 0.3rem;
+        }
+        .petpass-hero h1 {
+            color: white;
+            font-size: 2.1rem;
+            line-height: 1.15;
+            margin: 0;
+        }
+        .petpass-hero p {
+            color: #ecfffa;
+            font-size: 1rem;
+            margin: 0.55rem 0 0;
+            max-width: 760px;
+        }
+        .petpass-panel {
+            background: white;
+            border: 1px solid #d8eee6;
+            border-radius: 14px;
+            padding: 1rem 1.1rem;
+            margin: 0.7rem 0 1rem;
+        }
+        .petpass-muted {
+            color: #5b7376;
+            margin-top: -0.4rem;
+            margin-bottom: 1rem;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def page_header(kicker, title, subtitle):
+    st.markdown(
+        f"""
+        <div class="petpass-hero">
+            <div class="kicker">{kicker}</div>
+            <h1>{title}</h1>
+            <p>{subtitle}</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def load_tutores():
     return read_df("SELECT * FROM tutores ORDER BY id DESC")
 
@@ -225,16 +334,23 @@ def whatsapp_link(mascota, vacunas):
 
 
 def dashboard_page():
-    st.title("PetPass MX")
-    st.subheader("Dashboard")
+    page_header(
+        "Demo local para clínicas y estéticas",
+        "PetPass MX",
+        "Pasaporte digital básico para controlar tutores, mascotas, vacunas y recordatorios desde una computadora.",
+    )
 
     total_tutores, total_mascotas, total_vacunas = get_counts()
     col1, col2, col3 = st.columns(3)
-    col1.metric("Tutores", total_tutores)
-    col2.metric("Mascotas", total_mascotas)
-    col3.metric("Vacunas", total_vacunas)
+    col1.metric("Tutores registrados", total_tutores)
+    col2.metric("Mascotas activas", total_mascotas)
+    col3.metric("Vacunas en historial", total_vacunas)
 
-    st.markdown("### Próximas vacunas")
+    st.markdown("### Agenda de próximas vacunas")
+    st.markdown(
+        '<p class="petpass-muted">Ordenadas por fecha para facilitar llamadas, recepción y seguimiento.</p>',
+        unsafe_allow_html=True,
+    )
     proximas = read_df(
         """
         SELECT v.nombre_vacuna, v.proxima_fecha, v.responsable,
@@ -246,17 +362,26 @@ def dashboard_page():
         ORDER BY v.proxima_fecha ASC
         """
     )
-    st.dataframe(proximas, use_container_width=True, hide_index=True)
+    if proximas.empty:
+        st.info("Todavía no hay próximas vacunas registradas.")
+    else:
+        st.dataframe(proximas, use_container_width=True, hide_index=True)
 
 
 def tutores_page():
-    st.title("Tutores")
+    page_header(
+        "Clientes",
+        "Tutores",
+        "Registra los datos de contacto del responsable para mantener el expediente listo para seguimiento.",
+    )
+    st.markdown("### Nuevo tutor")
     with st.form("crear_tutor", clear_on_submit=True):
-        nombre = st.text_input("Nombre")
-        telefono = st.text_input("Teléfono")
+        col1, col2 = st.columns(2)
+        nombre = col1.text_input("Nombre del tutor")
+        telefono = col2.text_input("Teléfono")
         email = st.text_input("Email")
         notas = st.text_area("Notas")
-        submitted = st.form_submit_button("Crear tutor")
+        submitted = st.form_submit_button("Guardar tutor")
 
     if submitted:
         if nombre.strip():
@@ -264,19 +389,24 @@ def tutores_page():
                 "INSERT INTO tutores (nombre, telefono, email, notas) VALUES (?, ?, ?, ?)",
                 (nombre.strip(), telefono.strip(), email.strip(), notas.strip()),
             )
-            st.success("Tutor creado.")
+            st.success("Listo: tutor guardado correctamente.")
             st.rerun()
         else:
-            st.error("El nombre es obligatorio.")
+            st.error("Escribe el nombre del tutor para continuar.")
 
+    st.markdown("### Tutores registrados")
     st.dataframe(load_tutores(), use_container_width=True, hide_index=True)
 
 
 def mascotas_page():
-    st.title("Mascotas")
+    page_header(
+        "Pacientes",
+        "Mascotas",
+        "Vincula cada mascota con su tutor para construir su pasaporte digital.",
+    )
     tutores = load_tutores()
     if tutores.empty:
-        st.info("Primero crea un tutor.")
+        st.info("Primero crea un tutor para poder registrar mascotas.")
         return
 
     tutor_options = {
@@ -284,16 +414,20 @@ def mascotas_page():
         for row in tutores.itertuples()
     }
 
+    st.markdown("### Nueva mascota")
     with st.form("crear_mascota", clear_on_submit=True):
         tutor_label = st.selectbox("Tutor", list(tutor_options.keys()))
-        nombre = st.text_input("Nombre")
-        especie = st.selectbox("Especie", ["Perro", "Gato", "Otra"])
-        raza = st.text_input("Raza")
-        sexo = st.selectbox("Sexo", ["Hembra", "Macho", "No especificado"])
-        fecha_nacimiento = st.date_input("Fecha de nacimiento", value=None)
-        peso = st.number_input("Peso kg", min_value=0.0, step=0.1)
+        col1, col2 = st.columns(2)
+        nombre = col1.text_input("Nombre de la mascota")
+        especie = col2.selectbox("Especie", ["Perro", "Gato", "Otra"])
+        col3, col4 = st.columns(2)
+        raza = col3.text_input("Raza")
+        sexo = col4.selectbox("Sexo", ["Hembra", "Macho", "No especificado"])
+        col5, col6 = st.columns(2)
+        fecha_nacimiento = col5.date_input("Fecha de nacimiento", value=None)
+        peso = col6.number_input("Peso kg", min_value=0.0, step=0.1)
         notas = st.text_area("Notas")
-        submitted = st.form_submit_button("Crear mascota")
+        submitted = st.form_submit_button("Guardar mascota")
 
     if submitted:
         if nombre.strip():
@@ -314,19 +448,24 @@ def mascotas_page():
                     notas.strip(),
                 ),
             )
-            st.success("Mascota creada.")
+            st.success("Listo: mascota agregada al expediente.")
             st.rerun()
         else:
-            st.error("El nombre es obligatorio.")
+            st.error("Escribe el nombre de la mascota para continuar.")
 
+    st.markdown("### Mascotas registradas")
     st.dataframe(load_mascotas(), use_container_width=True, hide_index=True)
 
 
 def vacunas_page():
-    st.title("Vacunas")
+    page_header(
+        "Salud preventiva",
+        "Vacunas",
+        "Registra aplicaciones y próximas fechas para convertir el seguimiento en una oportunidad de recompra.",
+    )
     mascotas = load_mascotas()
     if mascotas.empty:
-        st.info("Primero crea una mascota.")
+        st.info("Primero crea una mascota para poder registrar vacunas.")
         return
 
     mascota_options = {
@@ -334,12 +473,15 @@ def vacunas_page():
         for row in mascotas.itertuples()
     }
 
+    st.markdown("### Nueva vacuna")
     with st.form("crear_vacuna", clear_on_submit=True):
         mascota_label = st.selectbox("Mascota", list(mascota_options.keys()))
-        nombre_vacuna = st.text_input("Nombre de vacuna")
-        fecha_aplicada = st.date_input("Fecha aplicada", value=None)
-        proxima_fecha = st.date_input("Próxima fecha", value=None)
-        responsable = st.text_input("Responsable")
+        col1, col2 = st.columns(2)
+        nombre_vacuna = col1.text_input("Nombre de vacuna")
+        responsable = col2.text_input("Responsable")
+        col3, col4 = st.columns(2)
+        fecha_aplicada = col3.date_input("Fecha aplicada", value=None)
+        proxima_fecha = col4.date_input("Próxima fecha", value=None)
         notas = st.text_area("Notas")
         submitted = st.form_submit_button("Registrar vacuna")
 
@@ -360,19 +502,24 @@ def vacunas_page():
                     notas.strip(),
                 ),
             )
-            st.success("Vacuna registrada.")
+            st.success("Listo: vacuna registrada en el pasaporte.")
             st.rerun()
         else:
-            st.error("El nombre de vacuna es obligatorio.")
+            st.error("Escribe el nombre de la vacuna para continuar.")
 
+    st.markdown("### Historial de vacunas")
     st.dataframe(load_vacunas(), use_container_width=True, hide_index=True)
 
 
 def expediente_page():
-    st.title("Expediente")
+    page_header(
+        "Pasaporte digital",
+        "Expediente de mascota",
+        "Consulta datos del tutor, historial de vacunas y genera material listo para compartir.",
+    )
     mascotas = load_mascotas()
     if mascotas.empty:
-        st.info("Primero crea una mascota o carga datos demo.")
+        st.info("Primero crea una mascota o carga datos demo para ver un expediente completo.")
         return
 
     mascota_options = {
@@ -390,33 +537,35 @@ def expediente_page():
 
     col1, col2 = st.columns(2)
     with col1:
-        st.markdown("### Mascota")
-        st.write(f"Nombre: {mascota['nombre']}")
-        st.write(f"Especie: {mascota['especie']}")
-        st.write(f"Raza: {mascota['raza']}")
-        st.write(f"Sexo: {mascota['sexo']}")
-        st.write(f"Nacimiento: {mascota['fecha_nacimiento']}")
-        st.write(f"Peso: {mascota['peso']} kg")
+        with st.container(border=True):
+            st.markdown("### Datos de mascota")
+            st.write(f"**Nombre:** {mascota['nombre']}")
+            st.write(f"**Especie:** {mascota['especie']}")
+            st.write(f"**Raza:** {mascota['raza']}")
+            st.write(f"**Sexo:** {mascota['sexo']}")
+            st.write(f"**Nacimiento:** {mascota['fecha_nacimiento']}")
+            st.write(f"**Peso:** {mascota['peso']} kg")
     with col2:
-        st.markdown("### Tutor")
-        st.write(f"Nombre: {mascota['tutor_nombre']}")
-        st.write(f"Teléfono: {mascota['telefono']}")
-        st.write(f"Email: {mascota['email']}")
+        with st.container(border=True):
+            st.markdown("### Datos de tutor")
+            st.write(f"**Nombre:** {mascota['tutor_nombre']}")
+            st.write(f"**Teléfono:** {mascota['telefono']}")
+            st.write(f"**Email:** {mascota['email']}")
 
     st.markdown("### Historial de vacunas")
     st.dataframe(vacunas, use_container_width=True, hide_index=True)
 
     col_qr, col_pdf = st.columns(2)
     with col_qr:
-        if st.button("Generar QR"):
+        if st.button("Generar QR del expediente"):
             qr_path = generate_qr(mascota)
-            st.success(f"QR generado: {qr_path}")
+            st.success(f"Listo: QR generado en {qr_path}")
             st.image(str(qr_path), width=180)
 
     with col_pdf:
-        if st.button("Generar PDF"):
+        if st.button("Generar PDF para entregar"):
             pdf_path = generate_pdf(mascota, vacunas)
-            st.success(f"PDF generado: {pdf_path}")
+            st.success(f"Listo: PDF generado en {pdf_path}")
 
     qr_path = QR_DIR / f"mascota_{mascota['id']}.png"
     if qr_path.exists():
@@ -424,9 +573,9 @@ def expediente_page():
 
     link = whatsapp_link(mascota, vacunas)
     if link:
-        st.link_button("Abrir recordatorio en WhatsApp", link)
+        st.link_button("Abrir recordatorio en WhatsApp Web", link)
     else:
-        st.info("Agrega teléfono del tutor para generar link de WhatsApp.")
+        st.info("Agrega teléfono del tutor para generar el link de WhatsApp.")
 
 
 def demo_exists():
@@ -495,25 +644,33 @@ def load_demo_data():
 
 
 def datos_demo_page():
-    st.title("Datos demo")
-    st.write("Carga 2 tutores, 3 mascotas y 3 vacunas.")
+    page_header(
+        "Modo presentación",
+        "Datos demo",
+        "Carga un ejemplo rápido para mostrar PetPass MX sin capturar información desde cero.",
+    )
+    st.write("Incluye 2 tutores, 3 mascotas y 3 vacunas.")
     if st.button("Cargar datos demo"):
         loaded = load_demo_data()
         if loaded:
-            st.success("Datos demo cargados.")
+            st.success("Listo: datos demo cargados para presentar la app.")
             st.rerun()
         else:
-            st.info("Los datos demo ya existen.")
+            st.info("Los datos demo ya existen, no se duplicaron.")
 
 
 def main():
     st.set_page_config(page_title="PetPass MX", layout="wide")
+    apply_visual_style()
     init_db()
 
+    st.sidebar.markdown("## PetPass MX")
+    st.sidebar.caption("Demo local para veterinarias y estéticas caninas")
     page = st.sidebar.radio(
-        "PetPass MX",
+        "Navegación",
         ["Dashboard", "Tutores", "Mascotas", "Vacunas", "Expediente", "Datos demo"],
     )
+    st.sidebar.caption("SQLite local | Sin nube | Sin login")
 
     if page == "Dashboard":
         dashboard_page()
