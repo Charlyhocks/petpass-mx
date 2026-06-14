@@ -388,14 +388,14 @@ def generate_pdf(mascota, vacunas):
 
     pdf.set_draw_color(216, 238, 230)
     pdf.set_fill_color(248, 252, 250)
-    pdf.rect(154, 46, 42, 72)
+    pdf.rect(154, 46, 42, 84)
     pdf.set_text_color(20, 63, 66)
     pdf.set_font("Helvetica", "B", 9)
     pdf.set_xy(157, 49)
     pdf.cell(36, 6, "Foto", align="C")
     if photo_path:
         try:
-            pdf.image(str(photo_path), x=157, y=56, w=36, h=28)
+            pdf.image(str(photo_path), x=157, y=56, w=36, h=26)
         except Exception:
             pdf.set_xy(157, 63)
             pdf.set_font("Helvetica", size=8)
@@ -405,12 +405,12 @@ def generate_pdf(mascota, vacunas):
         pdf.set_font("Helvetica", size=8)
         pdf.multi_cell(36, 5, "Sin foto registrada", align="C")
 
-    pdf.set_xy(157, 88)
+    pdf.set_xy(157, 86)
     pdf.set_font("Helvetica", "B", 9)
     pdf.cell(36, 6, "QR", align="C")
     if qr_path.exists():
         try:
-            pdf.image(str(qr_path), x=162, y=96, w=26)
+            pdf.image(str(qr_path), x=163, y=94, w=24)
         except Exception:
             pdf.set_xy(157, 98)
             pdf.set_font("Helvetica", size=8)
@@ -435,7 +435,7 @@ def generate_pdf(mascota, vacunas):
     field("Nacimiento", mascota["fecha_nacimiento"])
     field("Peso", f"{mascota['peso'] or ''} kg")
 
-    pdf.set_y(max(pdf.get_y() + 4, 124))
+    pdf.set_y(max(pdf.get_y() + 4, 136))
     pdf.set_x(14)
     pdf.set_fill_color(222, 244, 236)
     pdf.set_text_color(20, 63, 66)
@@ -459,7 +459,7 @@ def generate_pdf(mascota, vacunas):
         pdf.set_text_color(42, 69, 72)
         pdf.set_font("Helvetica", size=9)
         for _, vacuna in vacunas.iterrows():
-            if pdf.get_y() > 260:
+            if pdf.get_y() > 252:
                 pdf.add_page()
             pdf.set_x(14)
             pdf.cell(widths[0], 7, short(vacuna["nombre_vacuna"], 34), border="B")
@@ -468,10 +468,24 @@ def generate_pdf(mascota, vacunas):
             pdf.cell(widths[3], 7, short(vacuna["responsable"], 34), border="B")
             pdf.ln()
 
-    pdf.set_y(-18)
-    pdf.set_text_color(92, 115, 118)
-    pdf.set_font("Helvetica", size=8)
-    pdf.cell(0, 6, "PetPass MX | Documento local generado para el tutor de la mascota", align="C")
+    total_pages = pdf.page_no()
+    current_page = pdf.page
+    pdf.set_auto_page_break(auto=False)
+    for page_number in range(1, total_pages + 1):
+        if hasattr(pdf, "set_page"):
+            pdf.set_page(page_number)
+        else:
+            pdf.page = page_number
+        pdf.set_draw_color(216, 238, 230)
+        pdf.line(14, 279, 196, 279)
+        pdf.set_xy(14, 282)
+        pdf.set_text_color(92, 115, 118)
+        pdf.set_font("Helvetica", size=8)
+        pdf.cell(182, 5, "PetPass MX | Documento local generado para el tutor de la mascota", align="C")
+    if hasattr(pdf, "set_page"):
+        pdf.set_page(current_page)
+    else:
+        pdf.page = current_page
 
     pdf.output(str(file_path))
     return file_path
