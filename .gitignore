@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+.streamlit/
+data/*.db-journal
+storage/qr/*.png
+storage/pdf/*.pdf
+exports/*
+!exports/.gitkeep
