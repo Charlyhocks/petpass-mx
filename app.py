@@ -173,12 +173,10 @@ def show_clinic_gate():
     )
 
     with login_tab:
-        with st.form("login_supabase"):
-            email = st.text_input("Email")
-            password = st.text_input("Password", type="password")
-            submitted = st.form_submit_button("Iniciar sesión")
+        email = st.text_input("Email", key="login_email")
+        password = st.text_input("Password", type="password", key="login_password")
 
-        if submitted:
+        if st.button("Iniciar sesión", key="login_submit"):
             try:
                 response = sb().auth.sign_in_with_password(
                     {"email": email.strip(), "password": password}
@@ -198,15 +196,13 @@ def show_clinic_gate():
                 st.error(f"No se pudo iniciar sesión: {exc}")
 
     with signup_tab:
-        with st.form("signup_supabase"):
-            nombre_clinica = st.text_input("Nombre de clínica")
-            responsable = st.text_input("Nombre responsable")
-            email = st.text_input("Email de acceso")
-            password = st.text_input("Password", type="password")
-            telefono = st.text_input("Teléfono opcional")
-            submitted = st.form_submit_button("Crear cuenta y clínica")
+        nombre_clinica = st.text_input("Nombre de clínica", key="signup_clinica")
+        responsable = st.text_input("Nombre responsable", key="signup_responsable")
+        email = st.text_input("Email de acceso", key="signup_email")
+        password = st.text_input("Password", type="password", key="signup_password")
+        telefono = st.text_input("Teléfono opcional", key="signup_telefono")
 
-        if submitted:
+        if st.button("Crear cuenta y clínica", key="signup_submit"):
             if not nombre_clinica.strip() or not email.strip() or not password:
                 st.error("Clínica, email y password son obligatorios.")
                 return
